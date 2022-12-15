@@ -5,9 +5,11 @@
 #define __COMMON_KERN_USER_H
 
 /* This is the data record stored in the map */
-struct datarec {
+struct datarec
+{
 	__u64 rx_packets;
 	/* Assignment#1: Add byte counters */
+	__u64 rx_bytes;
 };
 
 #ifndef XDP_ACTION_MAX
