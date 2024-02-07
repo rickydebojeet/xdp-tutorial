@@ -8,28 +8,30 @@
  * - Here an array with XDP_ACTION_MAX (max_)entries are created.
  * - The idea is to keep stats per (enum) xdp_action
  */
-struct bpf_map_def SEC("maps") xdp_stats_map = {
-	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
-	.key_size = sizeof(__u32),
-	.value_size = sizeof(struct datarec),
-	.max_entries = XDP_ACTION_MAX,
-};
+/* 
+ * Assignment#3: Avoid the atomic operation
+ * - Hint there is a map type named BPF_MAP_TYPE_PERCPU_ARRAY
+ */
+struct {
+	// __uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); /* Assignment#3 */
+	__type(key, __u32);
+	__type(value, struct datarec);
+	__uint(max_entries, XDP_ACTION_MAX);
+} xdp_stats_map SEC(".maps");
 
 /* LLVM maps __sync_fetch_and_add() as a built-in function to the BPF atomic add
  * instruction (that is BPF_STX | BPF_XADD | BPF_W for word sizes)
  */
 #ifndef lock_xadd
-#define lock_xadd(ptr, val) ((void)__sync_fetch_and_add(ptr, val))
+#define lock_xadd(ptr, val)	((void) __sync_fetch_and_add(ptr, val))
 #endif
 
-SEC("xdp_stats1")
-int xdp_stats1_func(struct xdp_md *ctx)
+SEC("xdp")
+int  xdp_stats1_func(struct xdp_md *ctx)
 {
-	void *data_end = (void *)(long)ctx->data_end;
-	void *data = (void *)(long)ctx->data;
 	struct datarec *rec;
 	__u32 key = XDP_PASS; /* XDP_PASS = 2 */
-	__u64 bytes = data_end - data + 1;
 
 	/* Lookup in kernel BPF-side return pointer to actual data record */
 	rec = bpf_map_lookup_elem(&xdp_stats_map, &key);
@@ -44,13 +46,13 @@ int xdp_stats1_func(struct xdp_md *ctx)
 	 * use an atomic operation.
 	 */
 	lock_xadd(&rec->rx_packets, 1);
-	lock_xadd(&rec->rx_bytes, bytes);
 	/* Assignment#1: Add byte counters
 	 * - Hint look at struct xdp_md *ctx (copied below)
-	 *
-	 * Assignment#3: Avoid the atomic operation
-	 * - Hint there is a map type named BPF_MAP_TYPE_PERCPU_ARRAY
 	 */
+	void *data_end = (void *)(long)ctx->data_end;
+	void *data = (void *)(long)ctx->data;
+	__u64 bytes = data_end - data + 1;
+	lock_xadd(&rec->rx_bytes, bytes);
 
 	return XDP_PASS;
 }
