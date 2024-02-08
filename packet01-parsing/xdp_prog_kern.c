@@ -14,17 +14,13 @@
 #include "../common/xdp_stats_kern_user.h"
 #include "../common/xdp_stats_kern.h"
 
-#ifndef VLAN_MAX_DEPTH
-#define VLAN_MAX_DEPTH 2
-#endif
-
 /* Header cursor to keep track of current parsing position */
-struct hdr_cursor
-{
+struct hdr_cursor {
 	void *pos;
 };
 
 /* VLAN Header
+ * Assignment#4
  * @h_vlan_TCI: priority and VLAN ID
  * @h_vlan_encapsulated_proto: packet type ID or len
  */
@@ -33,6 +29,15 @@ struct vlan_hdr
 	__be16 h_vlan_TCI;
 	__be16 h_vlan_encapsulated_proto;
 };
+
+static __always_inline int proto_is_vlan(__u16 h_proto)
+{
+	return !!(h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD));
+}
+
+#ifndef VLAN_MAX_DEPTH
+#define VLAN_MAX_DEPTH 2
+#endif
 
 /* Packet parsing helpers.
  *
@@ -43,33 +48,28 @@ struct vlan_hdr
  * (h_proto for Ethernet, nexthdr for IPv6), for ICMP it is the ICMP type field.
  * All return values are in host byte order.
  */
-
-static __always_inline int proto_is_vlan(__u16 h_proto)
-{
-	return !!(h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD));
-}
-
 static __always_inline int parse_ethhdr(struct hdr_cursor *nh,
-										void *data_end,
-										struct ethhdr **ethhdr)
+					void *data_end,
+					struct ethhdr **ethhdr)
 {
 	struct ethhdr *eth = nh->pos;
 	int hdrsize = sizeof(*eth);
-	struct vlan_hdr *vlh;
-	__u16 h_proto;
 
 	/* Byte-count bounds check; check if current pointer + size of header
 	 * is after data_end.
+	 * Assignment#1
 	 */
 	if (nh->pos + hdrsize > data_end)
 		return -1;
 
 	nh->pos += hdrsize;
 	*ethhdr = eth;
-	vlh = nh->pos;
-	h_proto = eth->h_proto;
 
-/* Parse VLAN headers */
+	__u16 h_proto = eth->h_proto; /* network-byte-order */
+
+	/* Assignment#4: Handle VLAN tagged packet */
+	/* Parse VLAN headers */
+	struct vlan_hdr *vlh = nh->pos;
 #pragma unroll
 	for (int i = 0; i < VLAN_MAX_DEPTH; i++)
 	{
@@ -89,13 +89,14 @@ static __always_inline int parse_ethhdr(struct hdr_cursor *nh,
 	return h_proto; /* network-byte-order */
 }
 
-/* Assignment 2: Implement and use this */
+/* Assignment#2: Implement and use this */
 static __always_inline int parse_ip6hdr(struct hdr_cursor *nh,
-										void *data_end,
-										struct ipv6hdr **ip6hdr)
+					void *data_end,
+					struct ipv6hdr **ip6hdr)
 {
 	struct ipv6hdr *ip6h = nh->pos;
 
+	/* Pointer-arithmetic bounds check; pointer +1 should be valid */
 	if (ip6h + 1 > data_end)
 		return -1;
 
@@ -105,6 +106,7 @@ static __always_inline int parse_ip6hdr(struct hdr_cursor *nh,
 	return ip6h->nexthdr;
 }
 
+/* Assignment#5: ipv4 */
 static __always_inline int parse_iphdr(struct hdr_cursor *nh, void *data_end, struct iphdr **iphdr)
 {
 	struct iphdr *iph = nh->pos;
@@ -126,10 +128,10 @@ static __always_inline int parse_iphdr(struct hdr_cursor *nh, void *data_end, st
 	return iph->protocol;
 }
 
-/* Assignment 3: Implement and use this */
+/* Assignment#3: Implement and use this */
 static __always_inline int parse_icmp6hdr(struct hdr_cursor *nh,
-										  void *data_end,
-										  struct icmp6hdr **icmp6hdr)
+					  void *data_end,
+					  struct icmp6hdr **icmp6hdr)
 {
 	struct icmp6hdr *icmp6h = nh->pos;
 
@@ -142,6 +144,7 @@ static __always_inline int parse_icmp6hdr(struct hdr_cursor *nh,
 	return icmp6h->icmp6_type; /* network-byte-order */
 }
 
+/* Assignment#5: icmpv4 */
 static __always_inline int parse_icmphdr(struct hdr_cursor *nh, void *data_end, struct icmphdr **icmphdr)
 {
 	struct icmphdr *icmph = nh->pos;
@@ -155,16 +158,16 @@ static __always_inline int parse_icmphdr(struct hdr_cursor *nh, void *data_end, 
 	return icmph->type; /* network-byte-order */
 }
 
-SEC("xdp_packet_parser")
-int xdp_parser_func(struct xdp_md *ctx)
+SEC("xdp")
+int  xdp_parser_func(struct xdp_md *ctx)
 {
 	void *data_end = (void *)(long)ctx->data_end;
 	void *data = (void *)(long)ctx->data;
 	struct ethhdr *eth;
-	struct ipv6hdr *ip6h;
-	struct icmp6hdr *icmp6h;
-	struct iphdr *iph;
-	struct icmphdr *icmph;
+	struct ipv6hdr *ip6h; /* Assignment#2 */
+	struct icmp6hdr *icmp6h; /* Assignment#3 */
+	struct iphdr *iph; /* Assignment#5 */
+	struct icmphdr *icmph; /* Assignment#5 */
 
 	/* Default action XDP_PASS, imply everything we couldn't parse, or that
 	 * we don't want to deal with, we just pass up the stack and let the
@@ -172,10 +175,9 @@ int xdp_parser_func(struct xdp_md *ctx)
 	 */
 	__u32 action = XDP_PASS; /* Default action */
 
-	/* These keep track of the next header type and iterator pointer */
+        /* These keep track of the next header type and iterator pointer */
 	struct hdr_cursor nh;
 	int nh_type;
-	int seq;
 
 	/* Start next header cursor position at data start */
 	nh.pos = data;
@@ -184,6 +186,7 @@ int xdp_parser_func(struct xdp_md *ctx)
 	 * parsing fails. Each helper function does sanity checking (is the
 	 * header type in the packet correct?), and bounds checking.
 	 */
+	/* Assignment additions go below here */
 	nh_type = parse_ethhdr(&nh, data_end, &eth);
 	if (nh_type == bpf_htons(ETH_P_IPV6))
 	{
@@ -196,7 +199,7 @@ int xdp_parser_func(struct xdp_md *ctx)
 			goto out;
 
 		/* If we get here, we have successfully parsed an ICMPv6 echo request */
-		seq = bpf_ntohs(icmp6h->icmp6_sequence);
+		int seq = bpf_ntohs(icmp6h->icmp6_sequence);
 		if (seq % 2 != 0)
 			goto out;
 		action = XDP_DROP;
@@ -212,13 +215,15 @@ int xdp_parser_func(struct xdp_md *ctx)
 			goto out;
 
 		/* If we get here, we have successfully parsed an ICMPv4 echo request */
-		seq = bpf_ntohs(icmph->un.echo.sequence);
+		int seq = bpf_ntohs(icmph->un.echo.sequence);
 		if (seq % 2 != 0)
 			goto out;
 		action = XDP_DROP;
 	}
 	else
 		goto out;
+
+	action = XDP_DROP;
 out:
 	return xdp_stats_record_action(ctx, action); /* read via xdp_stats */
 }
