@@ -13,57 +13,171 @@
 
 /* Pops the outermost VLAN tag off the packet. Returns the popped VLAN ID on
  * success or -1 on failure.
+ * Assignment#2
  */
 static __always_inline int vlan_tag_pop(struct xdp_md *ctx, struct ethhdr *eth)
 {
-	/*
 	void *data_end = (void *)(long)ctx->data_end;
 	struct ethhdr eth_cpy;
 	struct vlan_hdr *vlh;
 	__be16 h_proto;
-	*/
 	int vlid = -1;
 
 	/* Check if there is a vlan tag to pop */
+	h_proto = eth->h_proto;
+	if (!proto_is_vlan(h_proto))
+		return -1;
 
 	/* Still need to do bounds checking */
+	vlh = (void *)(eth + 1);
+	if (vlh + 1 > data_end)
+		return -1;
 
 	/* Save vlan ID for returning, h_proto for updating Ethernet header */
+	vlid = bpf_htons(vlh->h_vlan_TCI);
+	h_proto = vlh->h_vlan_encapsulated_proto;
 
 	/* Make a copy of the outer Ethernet header before we cut it off */
+	__builtin_memcpy(&eth_cpy, eth, sizeof(eth_cpy));
 
 	/* Actually adjust the head pointer */
+	if(bpf_xdp_adjust_head(ctx, (int)sizeof(*vlh)))
+		return -1;
 
 	/* Need to re-evaluate data *and* data_end and do new bounds checking
 	 * after adjusting head
 	 */
+	eth = (void *)(long)ctx->data;
+	data_end = (void *)(long)ctx->data_end;
+	if (eth + 1 > data_end)
+		return -1;
 
 	/* Copy back the old Ethernet header and update the proto type */
-
+	__builtin_memcpy(eth, &eth_cpy, sizeof(eth_cpy));
+	eth->h_proto = h_proto;
 
 	return vlid;
 }
 
 /* Pushes a new VLAN tag after the Ethernet header. Returns 0 on success,
  * -1 on failure.
+  * Assignment#3
  */
 static __always_inline int vlan_tag_push(struct xdp_md *ctx,
 					 struct ethhdr *eth, int vlid)
 {
+	void *data_end = (void *)(long)ctx->data_end;
+	__be16 h_proto = eth->h_proto;
+	struct ethhdr eth_cpy;
+
+	__builtin_memcpy(&eth_cpy, eth, sizeof(eth_cpy));
+
+	/* Make room for the VLAN tag */
+	if (bpf_xdp_adjust_head(ctx, -(int)sizeof(struct vlan_hdr)))
+		return -1;
+
+	/* Need to re-evaluate data *and* data_end and do new bounds checking
+	 * after adjusting head
+	 */
+	eth = (void *)(long)ctx->data;
+	data_end = (void *)(long)ctx->data_end;
+	if (eth + 1 > data_end)
+		return -1;
+	
+	/* Copy back the old Ethernet header and update the proto type */
+	__builtin_memcpy(eth, &eth_cpy, sizeof(eth_cpy));
+	eth->h_proto = bpf_htons(ETH_P_8021Q);
+
+	/* Now we can safely add the VLAN tag */
+	struct vlan_hdr *vlh = (void *)(eth + 1);
+
+	if (vlh + 1 > data_end)
+		return -1;
+	
+	vlh->h_vlan_TCI = bpf_htons(vlid);
+	vlh->h_vlan_encapsulated_proto = h_proto;
+
 	return 0;
 }
 
-/* Implement assignment 1 in this section */
-SEC("xdp_port_rewrite")
+/* Implement Assignment#1 in this section */
+SEC("xdp")
 int xdp_port_rewrite_func(struct xdp_md *ctx)
 {
-	return XDP_PASS;
+	void *data_end = (void *)(long)ctx->data_end;
+	void *data = (void *)(long)ctx->data;
+
+	/* Default action XDP_PASS, imply everything we couldn't parse, or that
+	 * we don't want to deal with, we just pass up the stack and let the
+	 * kernel deal with it.
+	 */
+	__u32 action = XDP_PASS; /* Default action */
+
+	/* These keep track of the next header type and iterator pointer */
+	struct hdr_cursor nh;
+	int nh_type;
+	nh.pos = data;
+
+	struct ethhdr *eth;
+
+	/* Assignment#1*/
+	struct tcphdr *tcph;
+	struct udphdr *udph;
+
+	/* Packet parsing in steps: Get each header one at a time, aborting if
+	 * parsing fails. Each helper function does sanity checking (is the
+	 * header type in the packet correct?), and bounds checking.
+	 */
+	nh_type = parse_ethhdr(&nh, data_end, &eth);
+
+	if (nh_type == bpf_htons(ETH_P_IPV6))
+	{
+		struct ipv6hdr *ip6h;
+
+		nh_type = parse_ip6hdr(&nh, data_end, &ip6h);
+		if (nh_type == IPPROTO_TCP)
+		{
+			if (parse_tcphdr(&nh, data_end, &tcph) < 0)
+				goto out;
+			tcph->dest = bpf_htons(bpf_ntohs(tcph->dest) - 1);
+		}
+		else if (nh_type == IPPROTO_UDP)
+		{
+			if (parse_udphdr(&nh, data_end, &udph) < 0)
+				goto out;
+			udph->dest = bpf_htons(bpf_ntohs(udph->dest) - 1);
+		}
+		else
+			goto out;
+	}
+	else if (nh_type == bpf_htons(ETH_P_IP))
+	{
+		struct iphdr *iph;
+
+		nh_type = parse_iphdr(&nh, data_end, &iph);
+		if (nh_type == IPPROTO_TCP)
+		{
+			if (parse_tcphdr(&nh, data_end, &tcph) < 0)
+				goto out;
+			tcph->dest = bpf_htons(bpf_ntohs(tcph->dest) - 1);
+		}
+		else if (nh_type == IPPROTO_UDP)
+		{
+			if (parse_udphdr(&nh, data_end, &udph) < 0)
+				goto out;
+			udph->dest = bpf_htons(bpf_ntohs(udph->dest) - 1);
+		}
+		else
+			goto out;
+	}
+out:
+	return xdp_stats_record_action(ctx, action);
 }
 
 /* VLAN swapper; will pop outermost VLAN tag if it exists, otherwise push a new
- * one with ID 1. Use this for assignments 2 and 3.
+ * one with ID 1. Use this for Assignments#2 and Assignment#3.
  */
-SEC("xdp_vlan_swap")
+SEC("xdp")
 int xdp_vlan_swap_func(struct xdp_md *ctx)
 {
 	void *data_end = (void *)(long)ctx->data_end;
@@ -83,7 +197,7 @@ int xdp_vlan_swap_func(struct xdp_md *ctx)
 	if (proto_is_vlan(eth->h_proto))
 		vlan_tag_pop(ctx, eth);
 	else
-		vlan_tag_push(ctx, eth, 1);
+		vlan_tag_push(ctx, eth, 69);
 
 	return XDP_PASS;
 }
@@ -91,7 +205,7 @@ int xdp_vlan_swap_func(struct xdp_md *ctx)
 /* Solution to the parsing exercise in lesson packet01. Handles VLANs and legacy
  * IP (via the helpers in parsing_helpers.h).
  */
-SEC("xdp_packet_parser")
+SEC("xdp")
 int  xdp_parser_func(struct xdp_md *ctx)
 {
 	void *data_end = (void *)(long)ctx->data_end;
